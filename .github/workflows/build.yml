@@ -1,0 +1,73 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ios:
+    name: iOS app (unsigned IPA)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build (no signing)
+        working-directory: ios
+        run: |
+          xcodebuild \
+            -project PhonePad.xcodeproj \
+            -scheme PhonePad \
+            -configuration Release \
+            -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            SYMROOT="$PWD/build" \
+            build
+
+      - name: Package unsigned IPA
+        working-directory: ios
+        run: |
+          APP_PATH=$(find build/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
+          echo "app: $APP_PATH"
+          rm -rf Payload
+          mkdir Payload
+          cp -R "$APP_PATH" Payload/
+          zip -qry PhonePad-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PhonePad-ipa
+          path: ios/PhonePad-unsigned.ipa
+
+  windows:
+    name: Windows receiver (single EXE)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Publish single-file EXE
+        run: >
+          dotnet publish receiver/PhonePadReceiver.csproj
+          -c Release
+          -r win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -o out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PhonePadReceiver-exe
+          path: out/PhonePadReceiver.exe
