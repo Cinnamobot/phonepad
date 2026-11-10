@@ -29,7 +29,8 @@ struct ContentView: View {
                 onTap: { fingers in
                     ble.sendClick(fingers == 1 ? 0 : 1)
                 },
-                onScroll: { steps in ble.sendScroll(v: Int8(steps), h: 0) }
+                onScroll: { steps in ble.sendScroll(v: Int8(steps), h: 0) },
+                onHoldChange: { down in ble.sendButton(0, down: down) }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(
@@ -37,6 +38,10 @@ struct ContentView: View {
                     .foregroundStyle(.tertiary)
                     .allowsHitTesting(false)
             )
+
+            Text("タップ=クリック　長押しして動かす=ドラッグ　2本指タップ=右クリック　2本指上下=スクロール")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
 
             // 特殊キー（キーボード表示中のみ）
             if keyboardOpen {
@@ -51,19 +56,15 @@ struct ContentView: View {
             }
 
             // ボタン行
-            HStack(spacing: 10) {
-                HoldButton(label: "L") { down in ble.sendButton(0, down: down) }
-                HoldButton(label: "R") { down in ble.sendButton(1, down: down) }
-                Button {
-                    keyboardOpen.toggle()
-                } label: {
-                    Label(keyboardOpen ? "キーボードを閉じる" : "キーボード",
-                          systemImage: keyboardOpen ? "keyboard.chevron.compact.down" : "keyboard")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                }
-                .buttonStyle(.bordered)
+            Button {
+                keyboardOpen.toggle()
+            } label: {
+                Label(keyboardOpen ? "キーボードを閉じる" : "キーボード",
+                      systemImage: keyboardOpen ? "keyboard.chevron.compact.down" : "keyboard")
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
             }
+            .buttonStyle(.bordered)
 
             if !lastTyped.isEmpty {
                 Text("送信済み: \(lastTyped.suffix(30))")
@@ -108,33 +109,5 @@ struct ContentView: View {
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
-    }
-}
-
-/// 押している間だけマウスボタンを down にするボタン（ドラッグ用）
-private struct HoldButton: View {
-    var label: String
-    var onPressChange: (Bool) -> Void
-    @State private var pressed = false
-
-    var body: some View {
-        Text(label)
-            .frame(width: 64)
-            .padding(.vertical, 10)
-            .background(pressed ? Color.accentColor.opacity(0.4) : Color.secondary.opacity(0.15))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in
-                        if !pressed {
-                            pressed = true
-                            onPressChange(true)
-                        }
-                    }
-                    .onEnded { _ in
-                        pressed = false
-                        onPressChange(false)
-                    }
-            )
     }
 }

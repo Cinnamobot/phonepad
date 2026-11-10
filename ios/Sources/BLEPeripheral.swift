@@ -26,6 +26,7 @@ final class BLEPeripheral: NSObject, ObservableObject {
     private var pendingDX: Double = 0
     private var pendingDY: Double = 0
     private var flushTimer: Timer?
+    private var drainTimer: Timer?
 
     override init() {
         super.init()
@@ -37,6 +38,13 @@ final class BLEPeripheral: NSObject, ObservableObject {
         }
         RunLoop.main.add(timer, forMode: .common)
         flushTimer = timer
+        // 送信キューが IsReady コールバック頼みで詰まらないよう、定期的にも流す（保険）
+        let drain = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            self?.drainTextQueue()
+            self?.drainMouseQueue()
+        }
+        RunLoop.main.add(drain, forMode: .common)
+        drainTimer = drain
     }
 
     // MARK: - Advertising
@@ -143,13 +151,15 @@ final class BLEPeripheral: NSObject, ObservableObject {
     // MARK: - Text API
 
     /// 確定済みテキストを打つ。マルチバイト文字の途中で割らないよう文字単位でチャンクする。
+    /// チャンクは BLE の最小 MTU(23) でも確実に載る 20 バイト以下にする。
+    /// 大きな値は updateValue が受け付けず、テキストだけ黙って届かない事故になる。
     func sendType(_ string: String) {
         guard !string.isEmpty else { return }
         var chunk = ""
         var chunkBytes = 0
         for ch in string {
             let b = String(ch).utf8.count
-            if chunkBytes + b > 160, !chunk.isEmpty {
+            if chunkBytes + b > 20, !chunk.isEmpty {
                 enqueueText(Data([0x01]) + Data(chunk.utf8))
                 chunk = ""
                 chunkBytes = 0
