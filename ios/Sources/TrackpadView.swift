@@ -1,15 +1,21 @@
 import SwiftUI
 import UIKit
 
-/// マルチタッチを直接扱うトラックパッド面。
-/// 1本指ドラッグ=移動、1本指タップ=左クリック、
+/// 3本指ジェスチャー（ノートPCタッチパッド準拠）
+enum ThreeFingerGesture {
+    case tap, swipeUp, swipeDown, swipeLeft, swipeRight
+}
+
+/// マルチタッチを直接扱うトラックパッド面。挙動はノートPCのタッチパッドに合わせる。
+/// 1本指ドラッグ=移動（速度で加速）、1本指タップ=左クリック、
 /// タップ直後にもう一度触れて動かす（トン、ツー）=左ボタンを押したままドラッグ、
-/// 2本指タップ=右クリック、2本指ドラッグ=スクロール。
+/// 2本指タップ=右クリック、2本指ドラッグ=スクロール、3本指=タップ/スワイプ。
 struct TrackpadView: UIViewRepresentable {
     var onMove: (Double, Double) -> Void
     var onTap: (Int) -> Void // 引数 = 指の本数 (1 or 2)
     var onScroll: (Int) -> Void // 垂直ステップ（正=上）
     var onHoldChange: (Bool) -> Void // 2タップ目ドラッグの左ボタン down/up
+    var onThreeFinger: (ThreeFingerGesture) -> Void
 
     func makeUIView(context: Context) -> TrackpadUIView {
         let view = TrackpadUIView()
@@ -17,6 +23,7 @@ struct TrackpadView: UIViewRepresentable {
         view.onTap = onTap
         view.onScroll = onScroll
         view.onHoldChange = onHoldChange
+        view.onThreeFinger = onThreeFinger
         return view
     }
 
@@ -25,6 +32,7 @@ struct TrackpadView: UIViewRepresentable {
         uiView.onTap = onTap
         uiView.onScroll = onScroll
         uiView.onHoldChange = onHoldChange
+        uiView.onThreeFinger = onThreeFinger
     }
 }
 
@@ -33,15 +41,24 @@ final class TrackpadUIView: UIView {
     var onTap: ((Int) -> Void)?
     var onScroll: ((Int) -> Void)?
     var onHoldChange: ((Bool) -> Void)?
+    var onThreeFinger: ((ThreeFingerGesture) -> Void)?
 
-    /// 移動の感度（指の動きに対する倍率）
-    var sensitivity: Double = 1.8
+    /// ポインタ加速（タッチパッド準拠）: ゆっくり動かすと細かく、速いと大きく。
+    /// gain = slowGain + (maxGain - slowGain) * speed / (speed + knee)
+    private let slowGain = 1.1
+    private let maxGain = 3.6
+    private let gainKnee = 550.0 // pt/sec
+
+    private func accelGain(speed: Double) -> Double {
+        slowGain + (maxGain - slowGain) * speed / (speed + gainKnee)
+    }
 
     private struct TouchState {
         var last: CGPoint
         var start: CGPoint
         var beganAt: Date
         var maxTravel: CGFloat = 0
+        var lastMoveAt: Date
         /// 次の moved で現在位置を基準にし直す（2本→1本の切り替え直後用）
         var rebase = false
     }
@@ -59,6 +76,12 @@ final class TrackpadUIView: UIView {
     private let haptics = UIImpactFeedbackGenerator(style: .medium)
     /// タップ終了からこの時間内に再タッチしたらドラッグ開始とみなす
     private let dragChainWindow: TimeInterval = 0.35
+
+    // 3本指ジェスチャー
+    private var threeFingerSession = false
+    private var threeFingerFired = false
+    private var threeStartCentroid: CGPoint?
+    private var threeBeganAt = Date.distantPast
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -92,7 +115,15 @@ final class TrackpadUIView: UIView {
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
             let p = touch.location(in: self)
-            self.touches[ObjectIdentifier(touch)] = TouchState(last: p, start: p, beganAt: Date())
+            self.touches[ObjectIdentifier(touch)] = TouchState(last: p, start: p, beganAt: Date(), lastMoveAt: Date())
+        }
+        if self.touches.count >= 3, !threeFingerSession {
+            // 3本指セッション開始。スクロール/ドラッグとは競合させない
+            threeFingerSession = true
+            threeFingerFired = false
+            threeStartCentroid = centroid(of: self.touches.values.map { $0.last })
+            threeBeganAt = Date()
+            releaseHold()
         }
         if self.touches.count >= 2 {
             twoFingerSession = true
@@ -114,6 +145,7 @@ final class TrackpadUIView: UIView {
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        let now = Date()
         for touch in touches {
             let id = ObjectIdentifier(touch)
             guard var state = self.touches[id] else { continue }
@@ -122,18 +154,37 @@ final class TrackpadUIView: UIView {
                 state.rebase = false
                 state.last = p
                 state.start = p
+                state.lastMoveAt = now
             } else if !twoFingerSession {
-                let dx = Double(p.x - state.last.x) * sensitivity
-                let dy = Double(p.y - state.last.y) * sensitivity
+                let rawDx = Double(p.x - state.last.x)
+                let rawDy = Double(p.y - state.last.y)
+                let dt = max(now.timeIntervalSince(state.lastMoveAt), 0.001)
+                let speed = hypot(rawDx, rawDy) / dt // pt/sec
+                let gain = accelGain(speed: speed)
+                let dx = rawDx * gain
+                let dy = rawDy * gain
                 if dx != 0 || dy != 0 {
                     onMove?(dx, dy)
                 }
+                state.lastMoveAt = now
             }
             state.maxTravel = max(state.maxTravel, hypot(p.x - state.start.x, p.y - state.start.y))
             state.last = p
             self.touches[id] = state
         }
-        if twoFingerSession {
+        if threeFingerSession, !threeFingerFired, let start = threeStartCentroid {
+            let c = centroid(of: self.touches.values.map { $0.last })
+            let dx = c.x - start.x
+            let dy = c.y - start.y
+            if max(abs(dx), abs(dy)) >= 48 {
+                threeFingerFired = true
+                if abs(dx) > abs(dy) {
+                    onThreeFinger?(dx > 0 ? .swipeRight : .swipeLeft)
+                } else {
+                    onThreeFinger?(dy > 0 ? .swipeDown : .swipeUp)
+                }
+            }
+        } else if twoFingerSession {
             let c = centroid(of: self.touches.values.map { $0.last })
             if let last = lastCentroid {
                 scrollRemainder += last.y - c.y // 指が上 = 値が正 = 上スクロール
@@ -155,7 +206,15 @@ final class TrackpadUIView: UIView {
             let duration = now.timeIntervalSince(state.beganAt)
             let wasHeld = buttonHeld && heldTouchID == id
             if wasHeld { releaseHold() }
-            if twoFingerSession {
+            if threeFingerSession {
+                // 3本指タップ判定（最初に離れた指で1回だけ。短時間・ほぼ無移動）
+                if !threeFingerFired {
+                    threeFingerFired = true
+                    if now.timeIntervalSince(threeBeganAt) < 0.4, state.maxTravel < 16 {
+                        onThreeFinger?(.tap)
+                    }
+                }
+            } else if twoFingerSession {
                 // 2本指セッション中は両指が短時間・ほぼ無移動で離れたら右クリック（1回だけ）
                 if !twoFingerTapFired, duration < 0.35, state.maxTravel < 14 {
                     twoFingerTapFired = true
@@ -169,6 +228,10 @@ final class TrackpadUIView: UIView {
                 lastTapEndedAt = now
             }
             self.touches.removeValue(forKey: id)
+        }
+        if self.touches.count < 3, threeFingerSession {
+            threeFingerSession = false
+            threeStartCentroid = nil
         }
         if self.touches.count == 1, twoFingerSession {
             // 2本→1本に減ったらセッションを切り替え、残った指を移動として基準化し直す
@@ -195,6 +258,10 @@ final class TrackpadUIView: UIView {
         releaseHold()
         for touch in touches {
             self.touches.removeValue(forKey: ObjectIdentifier(touch))
+        }
+        if self.touches.count < 3 {
+            threeFingerSession = false
+            threeStartCentroid = nil
         }
         if self.touches.isEmpty {
             twoFingerSession = false

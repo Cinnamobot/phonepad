@@ -30,7 +30,17 @@ struct ContentView: View {
                     ble.sendClick(fingers == 1 ? 0 : 1)
                 },
                 onScroll: { steps in ble.sendScroll(v: Int8(steps), h: 0) },
-                onHoldChange: { down in ble.sendButton(0, down: down) }
+                onHoldChange: { down in ble.sendButton(0, down: down) },
+                onThreeFinger: { gesture in
+                    // Windowsタッチパッド標準の割り当て
+                    switch gesture {
+                    case .tap: ble.sendShortcut(4)       // Win+S（検索）
+                    case .swipeUp: ble.sendShortcut(0)   // Win+Tab（タスクビュー）
+                    case .swipeDown: ble.sendShortcut(1) // Win+D（デスクトップ表示）
+                    case .swipeRight: ble.sendShortcut(2) // Alt+Tab（次のアプリ）
+                    case .swipeLeft: ble.sendShortcut(3)  // Alt+Shift+Tab（前のアプリ）
+                    }
+                }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(
@@ -39,7 +49,7 @@ struct ContentView: View {
                     .allowsHitTesting(false)
             )
 
-            Text("タップ=クリック　トン、ツーと続けて動かす=ドラッグ　2本指タップ=右クリック　2本指上下=スクロール")
+            Text("タップ=クリック　トン、ツーと続けて動かす=ドラッグ　2本指タップ=右クリック　2本指上下=スクロール　3本指タップ=検索　3本指スワイプ=タスクビュー/アプリ切替")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 

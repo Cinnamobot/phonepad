@@ -175,6 +175,27 @@ internal static class InputInjector
                 if (vk != 0) Send(Key(vk, 0, 0), Key(vk, 0, KEYEVENTF_KEYUP));
                 break;
             }
+            case 0x05 when p.Length >= 2: // SHORTCUT: OSショートカット（3本指ジェスチャー用）
+            {
+                switch (p[1])
+                {
+                    case 0: KeyCombo(0x5B, 0x09); break;             // Win+Tab（タスクビュー）
+                    case 1: KeyCombo(0x5B, 0x44); break;             // Win+D（デスクトップ表示）
+                    case 2: KeyCombo(0x12, 0x09); break;             // Alt+Tab（次のアプリ）
+                    case 3: KeyCombo(0x12, 0x10, 0x09); break;       // Alt+Shift+Tab（前のアプリ）
+                    case 4: KeyCombo(0x5B, 0x53); break;             // Win+S（検索）
+                }
+                break;
+            }
         }
+    }
+
+    /// <summary>複合キー。同時押ししたいキーを順に down し、逆順に up する。</summary>
+    private static void KeyCombo(params ushort[] vks)
+    {
+        var inputs = new List<INPUT>(vks.Length * 2);
+        foreach (var vk in vks) inputs.Add(Key(vk, 0, 0));
+        for (int i = vks.Length - 1; i >= 0; i--) inputs.Add(Key(vks[i], 0, KEYEVENTF_KEYUP));
+        Send(inputs.ToArray());
     }
 }

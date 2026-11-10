@@ -196,6 +196,12 @@ final class BLEPeripheral: NSObject, ObservableObject {
         enqueueText(Data([0x04, key]))
     }
 
+    /// OSショートカット: 0=Win+Tab(タスクビュー), 1=Win+D(デスクトップ表示),
+    /// 2=Alt+Tab(次のアプリ), 3=Alt+Shift+Tab(前のアプリ), 4=Win+S(検索)
+    func sendShortcut(_ id: UInt8) {
+        enqueueText(Data([0x05, id]))
+    }
+
     private func enqueueText(_ data: Data) {
         textQueue.append(data)
         drainTextQueue()
