@@ -59,6 +59,8 @@ final class TrackpadUIView: UIView {
         var beganAt: Date
         var maxTravel: CGFloat = 0
         var lastMoveAt: Date
+        /// 加速ゲイン用の速度推定（指数移動平均で平滑化）
+        var smoothedSpeed: Double = 0
         /// 次の moved で現在位置を基準にし直す（2本→1本の切り替え直後用）
         var rebase = false
     }
@@ -155,14 +157,32 @@ final class TrackpadUIView: UIView {
                 state.last = p
                 state.start = p
                 state.lastMoveAt = now
+                state.smoothedSpeed = 0
             } else if !twoFingerSession {
-                let rawDx = Double(p.x - state.last.x)
-                let rawDy = Double(p.y - state.last.y)
-                let dt = max(now.timeIntervalSince(state.lastMoveAt), 0.001)
-                let speed = hypot(rawDx, rawDy) / dt // pt/sec
-                let gain = accelGain(speed: speed)
-                let dx = rawDx * gain
-                let dy = rawDy * gain
+                // 合体タッチ（中間サンプル）を全部たどる。イベントの最終点だけだと
+                // 高速時に軌跡が折れ線になって「荒く」感じる
+                let samples = event?.coalescedTouches(for: touch) ?? [touch]
+                var totalDx = 0.0
+                var totalDy = 0.0
+                var prev = state.last
+                for s in samples {
+                    let sp = s.location(in: self)
+                    totalDx += Double(sp.x - prev.x)
+                    totalDy += Double(sp.y - prev.y)
+                    prev = sp
+                }
+                let span: TimeInterval
+                if samples.count > 1, let first = samples.first, let last = samples.last {
+                    span = max(last.timestamp - first.timestamp, 0.001)
+                } else {
+                    span = max(now.timeIntervalSince(state.lastMoveAt), 0.001)
+                }
+                let instantSpeed = hypot(totalDx, totalDy) / span // pt/sec
+                // 速度推定を平滑化しないとゲインが暴れてカーソルがガタつく
+                state.smoothedSpeed = state.smoothedSpeed * 0.65 + instantSpeed * 0.35
+                let gain = accelGain(speed: state.smoothedSpeed)
+                let dx = totalDx * gain
+                let dy = totalDy * gain
                 if dx != 0 || dy != 0 {
                     onMove?(dx, dy)
                 }

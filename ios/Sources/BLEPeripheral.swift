@@ -27,7 +27,13 @@ final class BLEPeripheral: NSObject, ObservableObject {
 
     // テキストとマウスのボタン/スクロールは送信キューを積んで取りこぼさない。
     // マウス move は合体（coalesce）して間引くが、端数は蓄積して捨てない。
-    private var textQueue: [Data] = []
+    // テキストは投入時刻を持つ（滞留の検出＝本当の失敗判定に使う）
+    private struct QueuedPacket {
+        let data: Data
+        let enqueuedAt: Date
+        var stuckCounted = false
+    }
+    private var textQueue: [QueuedPacket] = []
     private var mouseQueue: [Data] = []
     private var pendingDX: Double = 0
     private var pendingDY: Double = 0
@@ -203,19 +209,24 @@ final class BLEPeripheral: NSObject, ObservableObject {
     }
 
     private func enqueueText(_ data: Data) {
-        textQueue.append(data)
+        textQueue.append(QueuedPacket(data: data, enqueuedAt: Date()))
         drainTextQueue()
     }
 
     private func drainTextQueue() {
         guard subscribedText else { return }
         while let head = textQueue.first {
-            if manager.updateValue(head, for: textChar, onSubscribedCentrals: nil) {
+            if manager.updateValue(head.data, for: textChar, onSubscribedCentrals: nil) {
                 textQueue.removeFirst()
                 textPacketsSent += 1
             } else {
-                textSendFailures += 1
-                break // キュー満杯。peripheralManagerIsReady / 定期ドレインで再開する
+                // 一時的なキュー満杯は失敗ではない（後から届く）。
+                // 2秒以上先頭に滞留した時だけ「本当の失敗」として1回数える
+                if !head.stuckCounted, Date().timeIntervalSince(head.enqueuedAt) > 2 {
+                    textQueue[0].stuckCounted = true
+                    textSendFailures += 1
+                }
+                break // peripheralManagerIsReady / 定期ドレインで再開する
             }
         }
     }

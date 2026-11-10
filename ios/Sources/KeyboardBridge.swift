@@ -38,10 +38,21 @@ struct KeyboardBridge: UIViewRepresentable {
     func updateUIView(_ uiView: UITextField, context: Context) {
         context.coordinator.onCommit = onCommit
         context.coordinator.onEnter = onEnter
+        if isOpen, !context.coordinator.wasOpen {
+            // 開くたびに鏡をリセットする（切断・再接続でズレた差分を持ち越さない）
+            context.coordinator.wasOpen = true
+            uiView.text = ""
+            context.coordinator.resetMirror()
+        } else if !isOpen {
+            context.coordinator.wasOpen = false
+        }
         if isOpen, !uiView.isFirstResponder {
             uiView.becomeFirstResponder()
         } else if !isOpen, uiView.isFirstResponder {
             uiView.resignFirstResponder()
+        }
+        if isOpen, uiView.isFirstResponder {
+            context.coordinator.ensurePolling()
         }
     }
 
@@ -52,6 +63,16 @@ struct KeyboardBridge: UIViewRepresentable {
         /// PC 側に送った確定済みテキスト
         private var sent = ""
         private var pollTimer: Timer?
+        var wasOpen = false
+
+        func resetMirror() {
+            sent = ""
+        }
+
+        /// ポーリングが止まっていたら再開する（DidEndEditing の誤発等への保険）
+        func ensurePolling() {
+            if pollTimer == nil { startPolling() }
+        }
 
         init(onCommit: @escaping (Int, String) -> Void, onEnter: @escaping () -> Void) {
             self.onCommit = onCommit
