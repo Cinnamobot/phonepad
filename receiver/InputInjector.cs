@@ -98,6 +98,70 @@ internal static class InputInjector
         }
     };
 
+    // ---- 移動スムージング ----
+    // BLE の通知は接続間隔（約30ms）ごとに固まって届く。受けた瞬間にそのまま
+    // 注入すると到着のムラがカーソルのムラになるため、到着ペースから速度を
+    // 推定し、4ms 周期で均して再生する（本物のマウスの等間隔レポートに寄せる）。
+    private const int TickMs = 4;
+    private static readonly object _moveLock = new();
+    private static double _pendX, _pendY;   // 受信済み・未送信の移動量
+    private static double _velX, _velY;     // 推定速度 (px/ms)
+    private static double _fracX, _fracY;   // 整数化で余った端数
+    private static long _lastArrival;
+    private static System.Threading.Timer? _moveTimer;
+
+    private static void QueueMove(int dx, int dy)
+    {
+        lock (_moveLock)
+        {
+            long now = Environment.TickCount64;
+            if (_lastArrival != 0)
+            {
+                double dt = Math.Clamp(now - _lastArrival, 4, 100);
+                _velX = _velX * 0.5 + dx / dt * 0.5;
+                _velY = _velY * 0.5 + dy / dt * 0.5;
+            }
+            else
+            {
+                _velX = dx / 30.0;
+                _velY = dy / 30.0;
+            }
+            _lastArrival = now;
+            _pendX += dx;
+            _pendY += dy;
+            _moveTimer ??= new System.Threading.Timer(MoveTick, null, TickMs, TickMs);
+        }
+    }
+
+    private static void MoveTick(object? state)
+    {
+        int ex, ey;
+        lock (_moveLock)
+        {
+            // 到着が止まったら速度を減衰させる（残量はクランプで守られる）
+            if (Environment.TickCount64 - _lastArrival > 80)
+            {
+                _velX *= 0.7;
+                _velY *= 0.7;
+            }
+            double sx = _velX * TickMs + _fracX;
+            double sy = _velY * TickMs + _fracY;
+            ex = (int)sx;
+            ey = (int)sy;
+            _fracX = sx - ex;
+            _fracY = sy - ey;
+            // 受け取った分以上は出さない。方向が食い違う瞬間はその軸を止める
+            if (Math.Abs(ex) > Math.Abs(_pendX)) { ex = (int)Math.Round(_pendX); _fracX = 0; }
+            if (Math.Abs(ey) > Math.Abs(_pendY)) { ey = (int)Math.Round(_pendY); _fracY = 0; }
+            if (ex != 0 && Math.Sign(ex) != Math.Sign(_pendX)) { ex = 0; _fracX = 0; }
+            if (ey != 0 && Math.Sign(ey) != Math.Sign(_pendY)) { ey = 0; _fracY = 0; }
+            _pendX -= ex;
+            _pendY -= ey;
+        }
+        if (ex != 0 || ey != 0)
+            Send(Mouse(MOUSEEVENTF_MOVE, ex, ey));
+    }
+
     // ---- Mouse characteristic packets ----
 
     public static void HandleMousePacket(byte[] p)
@@ -105,12 +169,12 @@ internal static class InputInjector
         if (p.Length == 0) return;
         switch (p[0])
         {
-            case 0x01 when p.Length >= 5: // MOVE
+            case 0x01 when p.Length >= 5: // MOVE（スムージング経由）
             {
                 int dx = BitConverter.ToInt16(p, 1);
                 int dy = BitConverter.ToInt16(p, 3);
                 if (dx != 0 || dy != 0)
-                    Send(Mouse(MOUSEEVENTF_MOVE, dx, dy));
+                    QueueMove(dx, dy);
                 break;
             }
             case 0x02 when p.Length >= 3: // BUTTON: 0=左,1=右,2=中 / 1=down,0=up
