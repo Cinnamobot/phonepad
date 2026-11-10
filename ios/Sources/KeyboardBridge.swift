@@ -4,6 +4,10 @@ import UIKit
 /// 隠し UITextField で iOS キーボード（フリック入力含む）を出し、
 /// 「確定済みテキスト」の差分だけをコールバックする。
 /// IME 未確定（marked）部分は送らない。確定が進むたびに差分（削除→追加入力）を返す。
+///
+/// 検出は editingChanged イベントに頼らない（IME 経由の変更では確実に発火しない
+/// ことがあるため）。キーボード表示中は 0.15 秒間隔でフィールドをポーリングして
+/// 差分を拾う。editingChanged が来たら即時チェックもする（冪等）。
 struct KeyboardBridge: UIViewRepresentable {
     @Binding var isOpen: Bool
     /// (backspaces, typeText) — PC 側の現在テキストを新しい確定テキストに合わせるための差分
@@ -47,23 +51,53 @@ struct KeyboardBridge: UIViewRepresentable {
         weak var field: UITextField?
         /// PC 側に送った確定済みテキスト
         private var sent = ""
+        private var pollTimer: Timer?
 
         init(onCommit: @escaping (Int, String) -> Void, onEnter: @escaping () -> Void) {
             self.onCommit = onCommit
             self.onEnter = onEnter
         }
 
-        /// テキストのうち IME 未確定部分を除いた「確定済み」文字列
+        func textFieldDidBeginEditing(_ textField: UITextField) {
+            startPolling()
+        }
+
+        func textFieldDidEndEditing(_ textField: UITextField) {
+            checkForChanges()
+            stopPolling()
+        }
+
+        private func startPolling() {
+            stopPolling()
+            let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
+                self?.checkForChanges()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            pollTimer = timer
+        }
+
+        private func stopPolling() {
+            pollTimer?.invalidate()
+            pollTimer = nil
+        }
+
+        /// テキストのうち IME 未確定部分を除いた「確定済み」文字列。
+        /// インデックス計算は文字単位の数え方の食い違いで壊れるので、
+        /// UITextInput の範囲取得でそのまま切り取る。
         private func committedText(of field: UITextField) -> String {
-            let text = field.text ?? ""
-            guard let marked = field.markedTextRange else { return text }
-            let start = field.offset(from: field.beginningOfDocument, to: marked.start)
-            guard start >= 0, start <= text.count else { return text }
-            let idx = text.index(text.startIndex, offsetBy: start)
-            return String(text[..<idx])
+            guard let marked = field.markedTextRange,
+                  let range = field.textRange(from: field.beginningOfDocument, to: marked.start),
+                  let prefix = field.text(in: range) else {
+                return field.text ?? ""
+            }
+            return prefix
         }
 
         @objc func textChanged() {
+            checkForChanges()
+        }
+
+        func checkForChanges() {
             guard let field else { return }
             let committed = committedText(of: field)
             guard committed != sent else { return }
@@ -76,6 +110,7 @@ struct KeyboardBridge: UIViewRepresentable {
         }
 
         func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+            checkForChanges() // ポーリング前に残っている確定分を先に送る
             onEnter()
             textField.text = ""
             sent = ""

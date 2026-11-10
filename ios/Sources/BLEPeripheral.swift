@@ -12,6 +12,12 @@ final class BLEPeripheral: NSObject, ObservableObject {
     @Published var isAdvertising = false
     @Published var isConnected = false
 
+    // テキスト送信の診断用（画面に表示して切り分けに使う）
+    @Published private(set) var textSubscribed = false
+    @Published private(set) var textPacketsSent = 0
+    @Published private(set) var textSendFailures = 0
+    @Published private(set) var textPayloadLimit = 19
+
     private var manager: CBPeripheralManager!
     private var mouseChar: CBMutableCharacteristic!
     private var textChar: CBMutableCharacteristic!
@@ -151,15 +157,15 @@ final class BLEPeripheral: NSObject, ObservableObject {
     // MARK: - Text API
 
     /// 確定済みテキストを打つ。マルチバイト文字の途中で割らないよう文字単位でチャンクする。
-    /// チャンクは BLE の最小 MTU(23) でも確実に載る 20 バイト以下にする。
-    /// 大きな値は updateValue が受け付けず、テキストだけ黙って届かない事故になる。
+    /// 1パケットの上限は購読時に決まる textPayloadLimit（相手が受け取れる最大値長 − 種別1バイト）。
+    /// 上限を超える値は updateValue が黙って受け付けず、テキストだけ届かない事故になる。
     func sendType(_ string: String) {
         guard !string.isEmpty else { return }
         var chunk = ""
         var chunkBytes = 0
         for ch in string {
             let b = String(ch).utf8.count
-            if chunkBytes + b > 20, !chunk.isEmpty {
+            if chunkBytes + b > textPayloadLimit, !chunk.isEmpty {
                 enqueueText(Data([0x01]) + Data(chunk.utf8))
                 chunk = ""
                 chunkBytes = 0
@@ -200,14 +206,17 @@ final class BLEPeripheral: NSObject, ObservableObject {
         while let head = textQueue.first {
             if manager.updateValue(head, for: textChar, onSubscribedCentrals: nil) {
                 textQueue.removeFirst()
+                textPacketsSent += 1
             } else {
-                break // キュー満杯。peripheralManagerIsReady で再開する
+                textSendFailures += 1
+                break // キュー満杯。peripheralManagerIsReady / 定期ドレインで再開する
             }
         }
     }
 
     private func refreshConnectionState() {
         isConnected = subscribedMouse || subscribedText
+        textSubscribed = subscribedText
     }
 }
 
@@ -234,6 +243,8 @@ extension BLEPeripheral: CBPeripheralManagerDelegate {
         }
         if characteristic.uuid == Self.textUUID {
             subscribedText = true
+            // 相手が1回の通知で受け取れる最大長に合わせてチャンク上限を決める
+            textPayloadLimit = max(19, central.maximumUpdateValueLength - 1)
             drainTextQueue()
         }
         refreshConnectionState()

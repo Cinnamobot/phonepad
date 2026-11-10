@@ -74,6 +74,12 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            // テキスト送信の切り分け用（購読・パケット上限・成功/失敗数）
+            Text("text診断: 購読\(ble.textSubscribed ? "OK" : "なし") / 上限\(ble.textPayloadLimit)B / 送信\(ble.textPacketsSent) / 失敗\(ble.textSendFailures)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
             // 隠しテキストフィールド（キーボードの受け口）
             KeyboardBridge(
                 isOpen: $keyboardOpen,
