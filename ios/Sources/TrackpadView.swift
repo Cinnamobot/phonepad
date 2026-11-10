@@ -2,13 +2,14 @@ import SwiftUI
 import UIKit
 
 /// マルチタッチを直接扱うトラックパッド面。
-/// 1本指ドラッグ=移動、1本指タップ=左クリック、1本指長押し(静止0.3秒)→左ボタンを押したままドラッグ、
+/// 1本指ドラッグ=移動、1本指タップ=左クリック、
+/// タップ直後にもう一度触れて動かす（トン、ツー）=左ボタンを押したままドラッグ、
 /// 2本指タップ=右クリック、2本指ドラッグ=スクロール。
 struct TrackpadView: UIViewRepresentable {
     var onMove: (Double, Double) -> Void
     var onTap: (Int) -> Void // 引数 = 指の本数 (1 or 2)
     var onScroll: (Int) -> Void // 垂直ステップ（正=上）
-    var onHoldChange: (Bool) -> Void // 長押しドラッグの左ボタン down/up
+    var onHoldChange: (Bool) -> Void // 2タップ目ドラッグの左ボタン down/up
 
     func makeUIView(context: Context) -> TrackpadUIView {
         let view = TrackpadUIView()
@@ -51,12 +52,13 @@ final class TrackpadUIView: UIView {
     private var lastCentroid: CGPoint?
     private var scrollRemainder: CGFloat = 0
 
-    // 長押しドラッグ（1本指で静止0.3秒 → 左ボタンを押下状態にする）
-    private var holdTimer: Timer?
-    private var holdCandidateID: ObjectIdentifier?
+    // 2タップ目ドラッグ（タップ直後の再タッチで左ボタンを押下状態にする）
+    private var lastTapEndedAt: Date?
     private var heldTouchID: ObjectIdentifier?
     private var buttonHeld = false
     private let haptics = UIImpactFeedbackGenerator(style: .medium)
+    /// タップ終了からこの時間内に再タッチしたらドラッグ開始とみなす
+    private let dragChainWindow: TimeInterval = 0.35
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -77,38 +79,9 @@ final class TrackpadUIView: UIView {
         )
     }
 
-    // MARK: - 長押しドラッグ
-
-    private func scheduleHold(for id: ObjectIdentifier) {
-        cancelHoldTimer()
-        holdCandidateID = id
-        // 指を置いたままの状態でも発火するよう common モードで回す
-        let timer = Timer(timeInterval: 0.30, repeats: false) { [weak self] _ in
-            self?.fireHold()
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        holdTimer = timer
-    }
-
-    private func cancelHoldTimer() {
-        holdTimer?.invalidate()
-        holdTimer = nil
-        holdCandidateID = nil
-    }
-
-    private func fireHold() {
-        holdTimer = nil
-        guard let id = holdCandidateID else { return }
-        holdCandidateID = nil
-        guard touches.count == 1, let state = touches[id], state.maxTravel < 10 else { return }
-        buttonHeld = true
-        heldTouchID = id
-        haptics.impactOccurred()
-        onHoldChange?(true)
-    }
+    // MARK: - 2タップ目ドラッグ
 
     private func releaseHold() {
-        cancelHoldTimer()
         if buttonHeld {
             buttonHeld = false
             heldTouchID = nil
@@ -125,10 +98,18 @@ final class TrackpadUIView: UIView {
             twoFingerSession = true
             lastCentroid = centroid(of: self.touches.values.map { $0.last })
             scrollRemainder = 0
-            // 2本目が来たら長押しドラッグは中断（ボタンが押ささったままにならないよう離す）
+            // 2本目が来たらドラッグは中断（ボタンが押ささったままにならないよう離す）
             releaseHold()
-        } else if self.touches.count == 1, let id = self.touches.keys.first {
-            scheduleHold(for: id)
+        } else if self.touches.count == 1, let id = self.touches.keys.first,
+                  let last = lastTapEndedAt,
+                  Date().timeIntervalSince(last) <= dragChainWindow {
+            // トン、ツー: 直前のタップに続く再タッチは「ボタンを押したまま」として始める。
+            // そのまま離せば2回目のクリック（=ダブルクリック）になる。
+            lastTapEndedAt = nil
+            buttonHeld = true
+            heldTouchID = id
+            haptics.impactOccurred()
+            onHoldChange?(true)
         }
     }
 
@@ -151,10 +132,6 @@ final class TrackpadUIView: UIView {
             state.maxTravel = max(state.maxTravel, hypot(p.x - state.start.x, p.y - state.start.y))
             state.last = p
             self.touches[id] = state
-            // 静止せず動き出したら長押し候補から外す（通常の移動として扱う）
-            if holdCandidateID == id, state.maxTravel >= 10 {
-                cancelHoldTimer()
-            }
         }
         if twoFingerSession {
             let c = centroid(of: self.touches.values.map { $0.last })
@@ -176,7 +153,6 @@ final class TrackpadUIView: UIView {
             let id = ObjectIdentifier(touch)
             guard let state = self.touches[id] else { continue }
             let duration = now.timeIntervalSince(state.beganAt)
-            if holdCandidateID == id { cancelHoldTimer() }
             let wasHeld = buttonHeld && heldTouchID == id
             if wasHeld { releaseHold() }
             if twoFingerSession {
@@ -186,9 +162,11 @@ final class TrackpadUIView: UIView {
                     onTap?(2)
                 }
             } else if wasHeld {
-                // 長押しドラッグとして処理済み（down→up で完結）。タップにはしない
+                // 2タップ目ドラッグとして処理済み（down→up で完結）。タップにはしない
             } else if duration < 0.35, state.maxTravel < 12 {
                 onTap?(1)
+                // 次の再タッチがドラッグ開始になるよう、タップ終了時刻を残す
+                lastTapEndedAt = now
             }
             self.touches.removeValue(forKey: id)
         }

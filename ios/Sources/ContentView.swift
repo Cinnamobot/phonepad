@@ -39,7 +39,7 @@ struct ContentView: View {
                     .allowsHitTesting(false)
             )
 
-            Text("タップ=クリック　長押しして動かす=ドラッグ　2本指タップ=右クリック　2本指上下=スクロール")
+            Text("タップ=クリック　トン、ツーと続けて動かす=ドラッグ　2本指タップ=右クリック　2本指上下=スクロール")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
