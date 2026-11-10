@@ -19,18 +19,24 @@ final class BLEPeripheral: NSObject, ObservableObject {
     private var subscribedMouse = false
     private var subscribedText = false
 
-    // テキストは送信キューを積んで取りこぼさない。マウス move は合体（coalesce）して間引く。
+    // テキストとマウスのボタン/スクロールは送信キューを積んで取りこぼさない。
+    // マウス move は合体（coalesce）して間引くが、端数は蓄積して捨てない。
     private var textQueue: [Data] = []
-    private var pendingDX: Int = 0
-    private var pendingDY: Int = 0
+    private var mouseQueue: [Data] = []
+    private var pendingDX: Double = 0
+    private var pendingDY: Double = 0
     private var flushTimer: Timer?
 
     override init() {
         super.init()
         manager = CBPeripheralManager(delegate: self, queue: .main)
-        flushTimer = Timer.scheduledTimer(withTimeInterval: 0.008, repeats: true) { [weak self] _ in
+        // タッチ操作中（トラッキングモード）でも止まらないよう common モードで回す。
+        // default モードだけだとドラッグ中にタイマーが止まり、移動が固まって届く。
+        let timer = Timer(timeInterval: 0.008, repeats: true) { [weak self] _ in
             self?.flushMove()
         }
+        RunLoop.main.add(timer, forMode: .common)
+        flushTimer = timer
     }
 
     // MARK: - Advertising
@@ -75,36 +81,63 @@ final class BLEPeripheral: NSObject, ObservableObject {
 
     // MARK: - Mouse API
 
-    /// 相対移動。次の flush (8ms 周期) でまとめて送る。
+    /// 相対移動。次の flush (8ms 周期) でまとめて送る。端数は次回に持ち越す。
     func sendMove(dx: Double, dy: Double) {
-        pendingDX += Int(dx.rounded())
-        pendingDY += Int(dy.rounded())
+        pendingDX += dx
+        pendingDY += dy
     }
 
     private func flushMove() {
-        guard subscribedMouse, pendingDX != 0 || pendingDY != 0 else { return }
-        let dx = max(Int16.min, min(Int16.max, Int16(pendingDX)))
-        let dy = max(Int16.min, min(Int16.max, Int16(pendingDY)))
-        pendingDX = 0
-        pendingDY = 0
+        guard subscribedMouse else { return }
+        let sendX = Int(pendingDX) // 0方向への切り捨て。余りは次回に残る
+        let sendY = Int(pendingDY)
+        guard sendX != 0 || sendY != 0 else { return }
+        pendingDX -= Double(sendX)
+        pendingDY -= Double(sendY)
+        let dx = Int16(max(Int(Int16.min), min(Int(Int16.max), sendX)))
+        let dy = Int16(max(Int(Int16.min), min(Int(Int16.max), sendY)))
         var data = Data([0x01])
         withUnsafeBytes(of: dx.littleEndian) { data.append(contentsOf: $0) }
         withUnsafeBytes(of: dy.littleEndian) { data.append(contentsOf: $0) }
-        _ = manager.updateValue(data, for: mouseChar, onSubscribedCentrals: nil)
+        if !manager.updateValue(data, for: mouseChar, onSubscribedCentrals: nil) {
+            // 送信キュー満杯で落ちた分は次回に回す（ボタン系と違い move は合体できる）
+            pendingDX += Double(dx)
+            pendingDY += Double(dy)
+        }
     }
 
-    /// button: 0=左, 1=右, 2=中
+    /// button: 0=左, 1=右, 2=中。ボタンとスクロールは確実に届ける（キュー＋再送）。
     func sendButton(_ button: UInt8, down: Bool) {
-        guard subscribedMouse else { return }
-        let data = Data([0x02, button, down ? 1 : 0])
-        _ = manager.updateValue(data, for: mouseChar, onSubscribedCentrals: nil)
+        enqueueMouse(Data([0x02, button, down ? 1 : 0]))
+    }
+
+    /// タップ相当のクリック。down と up の間に少し間を空け、受け手が取りこぼさないようにする。
+    func sendClick(_ button: UInt8) {
+        sendButton(button, down: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.sendButton(button, down: false)
+        }
     }
 
     /// v: 正=上方向, h: 正=右方向
     func sendScroll(v: Int8, h: Int8) {
+        enqueueMouse(Data([0x03, UInt8(bitPattern: v), UInt8(bitPattern: h)]))
+    }
+
+    private func enqueueMouse(_ data: Data) {
+        mouseQueue.append(data)
+        drainMouseQueue()
+    }
+
+    private func drainMouseQueue() {
         guard subscribedMouse else { return }
-        let data = Data([0x03, UInt8(bitPattern: v), UInt8(bitPattern: h)])
-        _ = manager.updateValue(data, for: mouseChar, onSubscribedCentrals: nil)
+        while let head = mouseQueue.first {
+            if manager.updateValue(head, for: mouseChar, onSubscribedCentrals: nil) {
+                mouseQueue.removeFirst()
+            } else {
+                break // キュー満杯。peripheralManagerIsReady で再開する
+            }
+        }
     }
 
     // MARK: - Text API
@@ -185,7 +218,10 @@ extension BLEPeripheral: CBPeripheralManagerDelegate {
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
-        if characteristic.uuid == Self.mouseUUID { subscribedMouse = true }
+        if characteristic.uuid == Self.mouseUUID {
+            subscribedMouse = true
+            drainMouseQueue()
+        }
         if characteristic.uuid == Self.textUUID {
             subscribedText = true
             drainTextQueue()
@@ -201,5 +237,6 @@ extension BLEPeripheral: CBPeripheralManagerDelegate {
 
     func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
         drainTextQueue()
+        drainMouseQueue()
     }
 }

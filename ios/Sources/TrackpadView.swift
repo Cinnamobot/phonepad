@@ -36,6 +36,8 @@ final class TrackpadUIView: UIView {
         var start: CGPoint
         var beganAt: Date
         var maxTravel: CGFloat = 0
+        /// 次の moved で現在位置を基準にし直す（2本→1本の切り替え直後用）
+        var rebase = false
     }
 
     private var touches: [ObjectIdentifier: TouchState] = [:]
@@ -80,7 +82,11 @@ final class TrackpadUIView: UIView {
             let id = ObjectIdentifier(touch)
             guard var state = self.touches[id] else { continue }
             let p = touch.location(in: self)
-            if !twoFingerSession {
+            if state.rebase {
+                state.rebase = false
+                state.last = p
+                state.start = p
+            } else if !twoFingerSession {
                 let dx = Double(p.x - state.last.x) * sensitivity
                 let dy = Double(p.y - state.last.y) * sensitivity
                 if dx != 0 || dy != 0 {
@@ -113,14 +119,26 @@ final class TrackpadUIView: UIView {
             let duration = now.timeIntervalSince(state.beganAt)
             if twoFingerSession {
                 // 2本指セッション中は両指が短時間・ほぼ無移動で離れたら右クリック（1回だけ）
-                if !twoFingerTapFired, duration < 0.30, state.maxTravel < 12 {
+                if !twoFingerTapFired, duration < 0.35, state.maxTravel < 14 {
                     twoFingerTapFired = true
                     onTap?(2)
                 }
-            } else if duration < 0.30, state.maxTravel < 10 {
+            } else if duration < 0.35, state.maxTravel < 12 {
                 onTap?(1)
             }
             self.touches.removeValue(forKey: id)
+        }
+        if self.touches.count == 1, twoFingerSession {
+            // 2本→1本に減ったらセッションを切り替え、残った指を移動として基準化し直す
+            twoFingerSession = false
+            twoFingerTapFired = false
+            lastCentroid = nil
+            if let remaining = self.touches.keys.first,
+               var state = self.touches[remaining] {
+                state.rebase = true
+                state.maxTravel = 0
+                self.touches[remaining] = state
+            }
         }
         if self.touches.isEmpty {
             twoFingerSession = false

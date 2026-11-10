@@ -27,13 +27,7 @@ struct ContentView: View {
             TrackpadView(
                 onMove: { dx, dy in ble.sendMove(dx: dx, dy: dy) },
                 onTap: { fingers in
-                    if fingers == 1 {
-                        ble.sendButton(0, down: true)
-                        ble.sendButton(0, down: false)
-                    } else {
-                        ble.sendButton(1, down: true)
-                        ble.sendButton(1, down: false)
-                    }
+                    ble.sendClick(fingers == 1 ? 0 : 1)
                 },
                 onScroll: { steps in ble.sendScroll(v: Int8(steps), h: 0) }
             )
