@@ -18,8 +18,23 @@ internal sealed class TrayContext : ApplicationContext
     private readonly BleClient _ble;
     private bool _balloonShown;
 
+    /// <summary>診断ログ（ユーザープロファイル直下）。受信パケットと注入結果を残す。</summary>
+    private static readonly string LogPath =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "phonepad-debug.log");
+
+    private static void Log(string msg)
+    {
+        try
+        {
+            File.AppendAllText(LogPath, $"{DateTime.Now:HH:mm:ss.fff} {msg}{Environment.NewLine}");
+        }
+        catch { /* ログ失敗で本体を止めない */ }
+    }
+
     public TrayContext()
     {
+        Log("=== receiver started ===");
+        InputInjector.Logger = Log;
         _statusItem = new ToolStripMenuItem("起動中…") { Enabled = false };
         var menu = new ContextMenuStrip();
         menu.Items.Add(_statusItem);
@@ -41,6 +56,7 @@ internal sealed class TrayContext : ApplicationContext
 
     private void OnStatusChanged(string status)
     {
+        Log($"status: {status}");
         // BLE コールバックは UI スレッド外から来るので、アイコンのハンドル経由で投げる
         var text = $"PhonePad: {status}";
         try

@@ -5,6 +5,14 @@ namespace PhonePadReceiver;
 /// <summary>SendInput によるマウス/キーボード注入。プロトコル解釈はここに集約する。</summary>
 internal static class InputInjector
 {
+    /// <summary>診断ログの出力先（TrayContext がファイル書き込みを設定する）</summary>
+    public static Action<string>? Logger;
+
+    private static void Log(string msg)
+    {
+        try { Logger?.Invoke(msg); } catch { /* ログ失敗で本体を止めない */ }
+    }
+
     // ---- Win32 ----
 
     [StructLayout(LayoutKind.Sequential)]
@@ -63,8 +71,13 @@ internal static class InputInjector
 
     private static void Send(params INPUT[] inputs)
     {
-        if (inputs.Length > 0)
-            SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
+        if (inputs.Length == 0) return;
+        uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
+        if (sent != (uint)inputs.Length)
+        {
+            // 注入できなかった分がある = OS側で弾かれた（権限/UIPI等）
+            Log($"SendInput partial: {sent}/{inputs.Length} err={Marshal.GetLastWin32Error()}");
+        }
     }
 
     private static INPUT Mouse(uint flags, int dx = 0, int dy = 0, uint data = 0) => new()
@@ -102,6 +115,7 @@ internal static class InputInjector
             }
             case 0x02 when p.Length >= 3: // BUTTON: 0=左,1=右,2=中 / 1=down,0=up
             {
+                Log($"MOUSE button btn={p[1]} state={p[2]}");
                 bool down = p[2] != 0;
                 uint flag = p[1] switch
                 {
@@ -131,11 +145,13 @@ internal static class InputInjector
     public static void HandleTextPacket(byte[] p)
     {
         if (p.Length == 0) return;
+        Log($"TEXT recv len={p.Length} kind=0x{p[0]:X2} hex={Convert.ToHexString(p.Take(Math.Min(24, p.Length)).ToArray())}");
         switch (p[0])
         {
             case 0x01: // TYPE: UTF-8（サロゲートペアはコードユニット単位で送ると正しく入る）
             {
                 string text = System.Text.Encoding.UTF8.GetString(p, 1, p.Length - 1);
+                Log($"TEXT type: \"{text}\" ({text.Length} chars)");
                 var inputs = new List<INPUT>(text.Length * 2);
                 foreach (char c in text)
                 {
