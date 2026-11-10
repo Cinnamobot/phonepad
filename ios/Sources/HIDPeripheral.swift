@@ -9,6 +9,10 @@ final class HIDPeripheral: NSObject, ObservableObject {
     @Published var bluetoothReady = false
     @Published var isAdvertising = false
     @Published var isConnected = false
+    /// サービス追加に失敗したらここに出す（切り分け用）
+    @Published var lastError: String?
+
+    private var protocolMode: UInt8 = 1 // 0=Boot, 1=Report
 
     private var manager: CBPeripheralManager!
     private var reportChar: CBMutableCharacteristic!
@@ -201,10 +205,48 @@ extension HIDPeripheral: CBPeripheralManagerDelegate {
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
-        if error == nil {
-            addedCount += 1
-            if addedCount >= 3 {
-                beginAdvertise()
+        if let error {
+            lastError = "didAdd \(service.uuid): \(error.localizedDescription)"
+            return
+        }
+        addedCount += 1
+        if addedCount >= 3 {
+            beginAdvertise()
+        }
+    }
+
+    /// 動的値の特性（Protocol Mode / Report / Battery）への読み取りに応答する。
+    /// これが無いと Windows の HID 列挙が途中でタイムアウトして入力端末にならない。
+    func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveRead request: CBATTRequest) {
+        let value: Data?
+        switch request.characteristic.uuid.uuidString {
+        case "2A4E": value = Data([protocolMode])
+        case "2A4D": value = Data([buttons, 0, 0, 0])
+        case "2A19": value = Data([100])
+        default: value = nil
+        }
+        guard let value else {
+            peripheral.respond(to: request, withResult: .attributeNotFound)
+            return
+        }
+        if request.offset > value.count {
+            peripheral.respond(to: request, withResult: .invalidOffset)
+            return
+        }
+        request.value = value.subdata(in: request.offset..<value.count)
+        peripheral.respond(to: request, withResult: .success)
+    }
+
+    func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
+        for request in requests {
+            switch request.characteristic.uuid.uuidString {
+            case "2A4E":
+                if let byte = request.value?.first { protocolMode = byte }
+            default:
+                break // 2A4C (Control Point) 等は受け取るだけ
+            }
+            if request.responseNeeded {
+                peripheral.respond(to: request, withResult: .success)
             }
         }
     }

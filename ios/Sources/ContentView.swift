@@ -22,6 +22,12 @@ struct ContentView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                if let error = hid.lastError {
+                    Text("HIDエラー: \(error)")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 Spacer()
             } else {
             // 状態表示
