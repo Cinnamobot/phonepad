@@ -245,9 +245,10 @@ extension HIDPeripheral: CBPeripheralManagerDelegate {
             default:
                 break // 2A4C (Control Point) 等は受け取るだけ
             }
-            if request.responseNeeded {
-                peripheral.respond(to: request, withResult: .success)
-            }
+        }
+        // 応答が必要な書き込みは先頭リクエストに1回だけ返す（フレームワーク側で吸収される）
+        if let first = requests.first {
+            peripheral.respond(to: first, withResult: .success)
         }
     }
 
