@@ -20,8 +20,26 @@ internal sealed class BleClient : IDisposable
     private bool _busy; // 接続処理中 or 接続済み
     private bool _disposed;
 
+    /// <summary>診断ログの出力先（TrayContext がファイル書き込みを設定する）</summary>
+    public static Action<string>? Logger;
+
+    private static void Log(string msg)
+    {
+        try { Logger?.Invoke(msg); } catch { /* ログ失敗で本体を止めない */ }
+    }
+
     /// <summary>状態表示用コールバック（UIスレッド保証なし。受け手で Invoke すること）</summary>
     public event Action<string>? StatusChanged;
+
+    /// <summary>手動再接続（トレイメニュー用）。接続を捨てて探索からやり直す。</summary>
+    public void Reconnect()
+    {
+        Log("manual reconnect requested");
+        CleanupDevice();
+        _busy = false;
+        try { _watcher.Stop(); } catch { /* ignore */ }
+        if (!_disposed) Start();
+    }
 
     public BleClient()
     {
@@ -80,7 +98,10 @@ internal sealed class BleClient : IDisposable
     {
         var result = await service.GetCharacteristicsForUuidAsync(uuid, BluetoothCacheMode.Uncached);
         if (result.Status != GattCommunicationStatus.Success || result.Characteristics.Count == 0)
+        {
+            Log($"subscribe FAILED (characteristic lookup): {uuid} status={result.Status}");
             throw new InvalidOperationException($"characteristic not found: {uuid}");
+        }
         var ch = result.Characteristics[0];
         ch.ValueChanged += (_, args) =>
         {
@@ -92,11 +113,16 @@ internal sealed class BleClient : IDisposable
         var status = await ch.WriteClientCharacteristicConfigurationDescriptorAsync(
             GattClientCharacteristicConfigurationDescriptorValue.Notify);
         if (status != GattCommunicationStatus.Success)
+        {
+            Log($"subscribe FAILED (CCCD write): {uuid} status={status}");
             throw new InvalidOperationException("subscribe failed");
+        }
+        Log($"subscribed OK: {uuid}");
     }
 
     private void OnConnectionStatusChanged(BluetoothLEDevice sender, object args)
     {
+        Log($"connection status: {sender.ConnectionStatus}");
         if (sender.ConnectionStatus == BluetoothConnectionStatus.Disconnected)
         {
             CleanupDevice();

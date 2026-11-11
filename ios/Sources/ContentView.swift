@@ -29,7 +29,7 @@ struct ContentView: View {
                 onTap: { fingers in
                     ble.sendClick(fingers == 1 ? 0 : 1)
                 },
-                onScroll: { steps in ble.sendScroll(v: Int8(steps), h: 0) },
+                onScroll: { v, h in ble.sendScroll(v: Int8(v), h: Int8(h)) },
                 onHoldChange: { down in ble.sendButton(0, down: down) },
                 onThreeFinger: { gesture in
                     // Windowsタッチパッド標準の割り当て

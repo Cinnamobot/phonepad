@@ -47,10 +47,12 @@ internal sealed class TrayContext : ApplicationContext
     {
         Log("=== receiver started ===");
         InputInjector.Logger = Log;
+        BleClient.Logger = Log;
         _statusItem = new ToolStripMenuItem("起動中…") { Enabled = false };
         var menu = new ContextMenuStrip();
         menu.Items.Add(_statusItem);
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("再接続", null, (_, _) => _ble.Reconnect());
         menu.Items.Add("終了", null, (_, _) => ExitThread());
 
         _icon = new NotifyIcon

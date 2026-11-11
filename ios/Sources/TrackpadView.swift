@@ -13,7 +13,7 @@ enum ThreeFingerGesture {
 struct TrackpadView: UIViewRepresentable {
     var onMove: (Double, Double) -> Void
     var onTap: (Int) -> Void // 引数 = 指の本数 (1 or 2)
-    var onScroll: (Int) -> Void // 垂直ステップ（正=上）
+    var onScroll: (Int, Int) -> Void // (垂直, 水平) ステップ（正=上/右）
     var onHoldChange: (Bool) -> Void // 2タップ目ドラッグの左ボタン down/up
     var onThreeFinger: (ThreeFingerGesture) -> Void
 
@@ -39,7 +39,7 @@ struct TrackpadView: UIViewRepresentable {
 final class TrackpadUIView: UIView {
     var onMove: ((Double, Double) -> Void)?
     var onTap: ((Int) -> Void)?
-    var onScroll: ((Int) -> Void)?
+    var onScroll: ((Int, Int) -> Void)?
     var onHoldChange: ((Bool) -> Void)?
     var onThreeFinger: ((ThreeFingerGesture) -> Void)?
 
@@ -70,6 +70,7 @@ final class TrackpadUIView: UIView {
     private var twoFingerTapFired = false
     private var lastCentroid: CGPoint?
     private var scrollRemainder: CGFloat = 0
+    private var scrollRemainderX: CGFloat = 0
 
     // 2タップ目ドラッグ（タップ直後の再タッチで左ボタンを押下状態にする）
     private var lastTapEndedAt: Date?
@@ -131,6 +132,7 @@ final class TrackpadUIView: UIView {
             twoFingerSession = true
             lastCentroid = centroid(of: self.touches.values.map { $0.last })
             scrollRemainder = 0
+            scrollRemainderX = 0
             // 2本目が来たらドラッグは中断（ボタンが押ささったままにならないよう離す）
             releaseHold()
         } else if self.touches.count == 1, let id = self.touches.keys.first,
@@ -208,10 +210,13 @@ final class TrackpadUIView: UIView {
             let c = centroid(of: self.touches.values.map { $0.last })
             if let last = lastCentroid {
                 scrollRemainder += last.y - c.y // 指が上 = 値が正 = 上スクロール
-                let steps = Int(scrollRemainder / 12)
-                if steps != 0 {
-                    onScroll?(max(-8, min(8, steps)))
-                    scrollRemainder -= CGFloat(steps) * 12
+                scrollRemainderX += c.x - last.x // 指が右 = 値が正 = 右スクロール
+                let vSteps = Int(scrollRemainder / 12)
+                let hSteps = Int(scrollRemainderX / 12)
+                if vSteps != 0 || hSteps != 0 {
+                    onScroll?(max(-8, min(8, vSteps)), max(-8, min(8, hSteps)))
+                    scrollRemainder -= CGFloat(vSteps) * 12
+                    scrollRemainderX -= CGFloat(hSteps) * 12
                 }
             }
             lastCentroid = c
