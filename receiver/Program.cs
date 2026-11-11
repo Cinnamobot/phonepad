@@ -1,12 +1,24 @@
+using System.Runtime.InteropServices;
+
 namespace PhonePadReceiver;
 
 internal static class Program
 {
+    // タイマ分解能を 1ms に上げる。これをしないとスムージング用タイマ (2ms) は
+    // Windows 既定の約15.6ms に丸められ、カーソルが結局ガタつく。
+    [DllImport("winmm.dll")]
+    private static extern uint timeBeginPeriod(uint uPeriod);
+
+    [DllImport("winmm.dll")]
+    private static extern uint timeEndPeriod(uint uPeriod);
+
     [STAThread]
     private static void Main()
     {
+        timeBeginPeriod(1);
         ApplicationConfiguration.Initialize();
         Application.Run(new TrayContext());
+        timeEndPeriod(1);
     }
 }
 

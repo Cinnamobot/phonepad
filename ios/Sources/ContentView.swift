@@ -2,34 +2,11 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var ble: BLEPeripheral
-    @EnvironmentObject private var hid: HIDPeripheral
-    @AppStorage("connMode") private var connMode = "receiver"
     @State private var keyboardOpen = false
     @State private var lastTyped = ""
 
     var body: some View {
         VStack(spacing: 14) {
-            Picker("方式", selection: $connMode) {
-                Text("レシーバ").tag("receiver")
-                Text("HID（実験）").tag("hid")
-            }
-            .pickerStyle(.segmented)
-
-            if connMode == "hid" {
-                hidStatusRow
-                hidPad
-                Text("HID実験モード: PCのBluetooth設定から「PhonePad」をペアリングしてください。マウスのみ対応（キーボード・3本指はレシーバ方式のみ）")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if let error = hid.lastError {
-                    Text("HIDエラー: \(error)")
-                        .font(.caption2)
-                        .foregroundStyle(.red)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                Spacer()
-            } else {
             // 状態表示
             HStack {
                 Circle()
@@ -132,58 +109,14 @@ struct ContentView: View {
                 }
             )
             .frame(width: 10, height: 1)
-            } // else (receiver mode)
         }
         .padding()
-        .onAppear { applyMode() }
-        .onChange(of: connMode) { _, _ in applyMode() }
-        .onChange(of: ble.bluetoothReady) { _, _ in applyMode() }
-        .onChange(of: hid.bluetoothReady) { _, _ in applyMode() }
-    }
-
-    private func applyMode() {
-        if connMode == "hid" {
-            ble.stopAdvertising()
-            hid.startAdvertising()
-        } else {
-            hid.stopAdvertising()
-            ble.startAdvertising()
+        .onAppear {
+            if ble.bluetoothReady { ble.startAdvertising() }
         }
-    }
-
-    private var hidStatusRow: some View {
-        HStack {
-            Circle()
-                .fill(hid.isConnected ? Color.green : (hid.isAdvertising ? Color.orange : Color.gray))
-                .frame(width: 10, height: 10)
-            Text(hid.isConnected ? "接続中（HID）" : (hid.isAdvertising ? "待ち受け中…（PCからペアリング）" : "停止中"))
-                .font(.subheadline)
-            Spacer()
-            Button(hid.isAdvertising ? "待ち受け停止" : "待ち受け開始") {
-                hid.isAdvertising ? hid.stopAdvertising() : hid.startAdvertising()
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(!hid.bluetoothReady)
+        .onChange(of: ble.bluetoothReady) { _, ready in
+            if ready { ble.startAdvertising() }
         }
-    }
-
-    private var hidPad: some View {
-        TrackpadView(
-            onMove: { dx, dy in hid.sendMove(dx: dx, dy: dy) },
-            onTap: { fingers in
-                hid.sendClick(fingers == 1 ? 0 : 1)
-            },
-            onScroll: { steps in hid.sendScroll(v: Int8(clamping: steps)) },
-            onHoldChange: { down in hid.sendButton(0, down: down) },
-            onThreeFinger: { _ in } // HIDマウスのみの実験では未対応
-        )
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .overlay(
-            Text("トラックパッド (HID)")
-                .foregroundStyle(.tertiary)
-                .allowsHitTesting(false)
-        )
     }
 
     private func specialKey(_ icon: String, label: String, action: @escaping () -> Void) -> some View {

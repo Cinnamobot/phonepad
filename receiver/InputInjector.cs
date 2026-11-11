@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace PhonePadReceiver;
@@ -100,66 +101,111 @@ internal static class InputInjector
 
     // ---- 移動スムージング ----
     // BLE の通知は接続間隔（約30ms）ごとに固まって届く。受けた瞬間にそのまま
-    // 注入すると到着のムラがカーソルのムラになるため、到着ペースから速度を
-    // 推定し、4ms 周期で均して再生する（本物のマウスの等間隔レポートに寄せる）。
-    private const int TickMs = 4;
+    // 注入すると到着のムラがカーソルのムラになる。
+    // v2.2 の方式: 受信デルタを「目標位置」に積み、仮想位置が指数バネで追いつく。
+    // 2ms 周期で少しずつ注入するので、バースト到着でもカーソルは連続して滑る。
+    // 到着間隔からの速度推定はバースト時に暴れるため使わず、速さは時定数の
+    // 調整（速い移動ほど追従を速く＝遅延を減らす）にだけ使う。
+    // 前提: Program 側で timeBeginPeriod(1) 済み（無いとタイマは約15.6msに丸まる）。
+    private const int TickMs = 2;
     private static readonly object _moveLock = new();
-    private static double _pendX, _pendY;   // 受信済み・未送信の移動量
-    private static double _velX, _velY;     // 推定速度 (px/ms)
-    private static double _fracX, _fracY;   // 整数化で余った端数
-    private static long _lastArrival;
+    private static double _tgtX, _tgtY;   // 受信済み累計（目標位置）
+    private static double _posX, _posY;   // 仮想位置（バネで追従）
+    private static int _sentX, _sentY;    // 実際に注入した累計
+    private static double _speed;         // 目標の移動速度 EMA (px/ms)
+    private static long _lastArrivalTs;
+    private static long _lastTickTs;
     private static System.Threading.Timer? _moveTimer;
+
+    private static double Ms(long ts) => ts * 1000.0 / Stopwatch.Frequency;
+
+    private static void EnsureTimerLocked()
+    {
+        if (_moveTimer == null)
+        {
+            _lastTickTs = Stopwatch.GetTimestamp();
+            _moveTimer = new System.Threading.Timer(MoveTick, null, TickMs, TickMs);
+        }
+    }
 
     private static void QueueMove(int dx, int dy)
     {
         lock (_moveLock)
         {
-            long now = Environment.TickCount64;
-            if (_lastArrival != 0)
+            long now = Stopwatch.GetTimestamp();
+            if (_lastArrivalTs != 0)
             {
-                double dt = Math.Clamp(now - _lastArrival, 4, 100);
-                _velX = _velX * 0.5 + dx / dt * 0.5;
-                _velY = _velY * 0.5 + dy / dt * 0.5;
+                double dt = Math.Clamp(Ms(now - _lastArrivalTs), 4, 100);
+                double inst = Math.Sqrt((double)dx * dx + (double)dy * dy) / dt;
+                _speed = _speed * 0.6 + inst * 0.4;
             }
-            else
-            {
-                _velX = dx / 30.0;
-                _velY = dy / 30.0;
-            }
-            _lastArrival = now;
-            _pendX += dx;
-            _pendY += dy;
-            _moveTimer ??= new System.Threading.Timer(MoveTick, null, TickMs, TickMs);
+            _lastArrivalTs = now;
+            _tgtX += dx;
+            _tgtY += dy;
+            EnsureTimerLocked();
         }
     }
 
     private static void MoveTick(object? state)
     {
-        int ex, ey;
+        int ex, ey, wheelV, wheelH;
         lock (_moveLock)
         {
-            // 到着が止まったら速度を減衰させる（残量はクランプで守られる）
-            if (Environment.TickCount64 - _lastArrival > 80)
+            long now = Stopwatch.GetTimestamp();
+            double dt = Math.Clamp(Ms(now - _lastTickTs), 0.5, 50);
+            _lastTickTs = now;
+            double tau = _speed > 1.5 ? 8 : _speed > 0.5 ? 13 : 20; // ms
+            double k = 1 - Math.Exp(-dt / tau);
+            _posX += (_tgtX - _posX) * k;
+            _posY += (_tgtY - _posY) * k;
+            if (Math.Abs(_tgtX - _posX) < 0.4) _posX = _tgtX;
+            if (Math.Abs(_tgtY - _posY) < 0.4) _posY = _tgtY;
+            int nx = (int)Math.Round(_posX);
+            int ny = (int)Math.Round(_posY);
+            ex = nx - _sentX;
+            ey = ny - _sentY;
+            _sentX = nx;
+            _sentY = ny;
+            wheelV = DrainWheel(ref _wheelV);
+            wheelH = DrainWheel(ref _wheelH);
+            if (ex == 0 && ey == 0 && _posX == _tgtX && _posY == _tgtY && _wheelV == 0 && _wheelH == 0)
             {
-                _velX *= 0.7;
-                _velY *= 0.7;
+                _moveTimer?.Dispose();
+                _moveTimer = null;
+                _speed = 0;
             }
-            double sx = _velX * TickMs + _fracX;
-            double sy = _velY * TickMs + _fracY;
-            ex = (int)sx;
-            ey = (int)sy;
-            _fracX = sx - ex;
-            _fracY = sy - ey;
-            // 受け取った分以上は出さない。方向が食い違う瞬間はその軸を止める
-            if (Math.Abs(ex) > Math.Abs(_pendX)) { ex = (int)Math.Round(_pendX); _fracX = 0; }
-            if (Math.Abs(ey) > Math.Abs(_pendY)) { ey = (int)Math.Round(_pendY); _fracY = 0; }
-            if (ex != 0 && Math.Sign(ex) != Math.Sign(_pendX)) { ex = 0; _fracX = 0; }
-            if (ey != 0 && Math.Sign(ey) != Math.Sign(_pendY)) { ey = 0; _fracY = 0; }
-            _pendX -= ex;
-            _pendY -= ey;
         }
         if (ex != 0 || ey != 0)
             Send(Mouse(MOUSEEVENTF_MOVE, ex, ey));
+        if (wheelV != 0 || wheelH != 0)
+        {
+            var inputs = new List<INPUT>();
+            if (wheelV != 0) inputs.Add(Mouse(MOUSEEVENTF_WHEEL, data: unchecked((uint)wheelV)));
+            if (wheelH != 0) inputs.Add(Mouse(MOUSEEVENTF_HWHEEL, data: unchecked((uint)wheelH)));
+            Send(inputs.ToArray());
+        }
+    }
+
+    // ---- スクロール細分化 ----
+    // 1ノッチ (120) を一発で送ると段付きになるため、溜めて同じティックで少しずつ出す。
+    private static double _wheelV, _wheelH; // 単位はホイールデルタ（120 = 1ノッチ）
+
+    private static void QueueWheel(int vUnits, int hUnits)
+    {
+        lock (_moveLock)
+        {
+            _wheelV += vUnits;
+            _wheelH += hUnits;
+            EnsureTimerLocked();
+        }
+    }
+
+    private static int DrainWheel(ref double pending)
+    {
+        const int cap = 16; // 1ティック (2ms) あたりの上限。1ノッチは約8ティックで捌ける
+        int emit = (int)Math.Clamp(Math.Round(pending), -cap, cap);
+        pending -= emit;
+        return emit;
     }
 
     // ---- Mouse characteristic packets ----
@@ -191,14 +237,12 @@ internal static class InputInjector
                 if (flag != 0) Send(Mouse(flag));
                 break;
             }
-            case 0x03 when p.Length >= 3: // SCROLL: 正=上/右、1単位=1ノッチ(120)
+            case 0x03 when p.Length >= 3: // SCROLL: 正=上/右、1単位=1ノッチ(120)。細分化キューへ
             {
                 sbyte v = (sbyte)p[1];
                 sbyte h = (sbyte)p[2];
-                var inputs = new List<INPUT>();
-                if (v != 0) inputs.Add(Mouse(MOUSEEVENTF_WHEEL, data: unchecked((uint)(v * 120))));
-                if (h != 0) inputs.Add(Mouse(MOUSEEVENTF_HWHEEL, data: unchecked((uint)(h * 120))));
-                Send(inputs.ToArray());
+                if (v != 0 || h != 0)
+                    QueueWheel(v * 120, h * 120);
                 break;
             }
         }
