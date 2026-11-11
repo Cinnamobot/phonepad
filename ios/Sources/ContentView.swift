@@ -94,13 +94,15 @@ struct ContentView: View {
             KeyboardBridge(
                 isOpen: $keyboardOpen,
                 onCommit: { backspaces, text in
-                    if backspaces > 0 { ble.sendBackspaces(backspaces) }
+                    // 鏡（送信済み表示）は「消してから足す」。逆だと変換後の文字が
+                    // 消えて変換前のひらがなが残り続ける
+                    if backspaces > 0 {
+                        ble.sendBackspaces(backspaces)
+                        lastTyped = String(lastTyped.dropLast(min(backspaces, lastTyped.count)))
+                    }
                     if !text.isEmpty {
                         ble.sendType(text)
                         lastTyped += text
-                    }
-                    if backspaces > 0 {
-                        lastTyped = String(lastTyped.dropLast(min(backspaces, lastTyped.count)))
                     }
                 },
                 onEnter: {

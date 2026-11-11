@@ -102,31 +102,32 @@ internal static class InputInjector
     // ---- 移動スムージング ----
     // BLE の通知は接続間隔（約30ms）ごとに固まって届く。受けた瞬間にそのまま
     // 注入すると到着のムラがカーソルのムラになる。
-    // v2.2 の方式: 受信デルタを「目標位置」に積み、仮想位置が指数バネで追いつく。
-    // 2ms 周期で少しずつ注入するので、バースト到着でもカーソルは連続して滑る。
-    // 到着間隔からの速度推定はバースト時に暴れるため使わず、速さは時定数の
-    // 調整（速い移動ほど追従を速く＝遅延を減らす）にだけ使う。
-    // 前提: Program 側で timeBeginPeriod(1) 済み（無いとタイマは約15.6msに丸まる）。
+    // v2.4 の方式: バックログを「推定到着間隔で捌き切る一定速度」で流す。
+    // バネ追従（v2.2）は指数カーブで脈打ち、バースト周期と同期してカクついた。
+    // 速度は到着ごとに バックログ/間隔 で求め、半分ずつなじませる。
+    // タイマは常駐（2ms）。前提: Program 側で timeBeginPeriod(1) 済み。
     private const int TickMs = 2;
     private static readonly object _moveLock = new();
-    private static double _tgtX, _tgtY;   // 受信済み累計（目標位置）
-    private static double _posX, _posY;   // 仮想位置（バネで追従）
-    private static int _sentX, _sentY;    // 実際に注入した累計
-    private static double _speed;         // 目標の移動速度 EMA (px/ms)
+    private static double _pendX, _pendY;   // 受信済み・未送信（端数込み）
+    private static double _velX, _velY;     // 再生速度 (px/ms)
+    private static double _interval = 30;   // 到着間隔 EMA (ms)
     private static long _lastArrivalTs;
     private static long _lastTickTs;
-    private static System.Threading.Timer? _moveTimer;
+    private static readonly System.Threading.Timer _moveTimer;
+
+    // 統計（詰まり切り分け用。約5秒ごとに1行だけログに出す）
+    private static int _statArrivals, _statEmits;
+    private static double _statMaxPend;
+    private static long _statWindowStart;
+
+    static InputInjector()
+    {
+        _lastTickTs = Stopwatch.GetTimestamp();
+        _statWindowStart = _lastTickTs;
+        _moveTimer = new System.Threading.Timer(MoveTick, null, TickMs, TickMs);
+    }
 
     private static double Ms(long ts) => ts * 1000.0 / Stopwatch.Frequency;
-
-    private static void EnsureTimerLocked()
-    {
-        if (_moveTimer == null)
-        {
-            _lastTickTs = Stopwatch.GetTimestamp();
-            _moveTimer = new System.Threading.Timer(MoveTick, null, TickMs, TickMs);
-        }
-    }
 
     private static void QueueMove(int dx, int dy)
     {
@@ -135,46 +136,49 @@ internal static class InputInjector
             long now = Stopwatch.GetTimestamp();
             if (_lastArrivalTs != 0)
             {
-                double dt = Math.Clamp(Ms(now - _lastArrivalTs), 4, 100);
-                double inst = Math.Sqrt((double)dx * dx + (double)dy * dy) / dt;
-                _speed = _speed * 0.6 + inst * 0.4;
+                double gap = Ms(now - _lastArrivalTs);
+                if (gap >= 4 && gap <= 120)
+                    _interval = _interval * 0.7 + gap * 0.3;
             }
             _lastArrivalTs = now;
-            _tgtX += dx;
-            _tgtY += dy;
-            EnsureTimerLocked();
+            _pendX += dx;
+            _pendY += dy;
+            // このバックログを推定間隔で捌く速度。到着のたびに半分なじませる
+            double nvx = _pendX / _interval;
+            double nvy = _pendY / _interval;
+            if (_velX == 0 && _velY == 0) { _velX = nvx; _velY = nvy; }
+            else { _velX = _velX * 0.5 + nvx * 0.5; _velY = _velY * 0.5 + nvy * 0.5; }
+            _statArrivals++;
+            double mag = Math.Sqrt(_pendX * _pendX + _pendY * _pendY);
+            if (mag > _statMaxPend) _statMaxPend = mag;
         }
     }
 
     private static void MoveTick(object? state)
     {
         int ex, ey, wheelV, wheelH;
+        string? statLine = null;
         lock (_moveLock)
         {
             long now = Stopwatch.GetTimestamp();
             double dt = Math.Clamp(Ms(now - _lastTickTs), 0.5, 50);
             _lastTickTs = now;
-            double tau = _speed > 1.5 ? 8 : _speed > 0.5 ? 13 : 20; // ms
-            double k = 1 - Math.Exp(-dt / tau);
-            _posX += (_tgtX - _posX) * k;
-            _posY += (_tgtY - _posY) * k;
-            if (Math.Abs(_tgtX - _posX) < 0.4) _posX = _tgtX;
-            if (Math.Abs(_tgtY - _posY) < 0.4) _posY = _tgtY;
-            int nx = (int)Math.Round(_posX);
-            int ny = (int)Math.Round(_posY);
-            ex = nx - _sentX;
-            ey = ny - _sentY;
-            _sentX = nx;
-            _sentY = ny;
+            ex = DrainAxis(ref _pendX, ref _velX, dt);
+            ey = DrainAxis(ref _pendY, ref _velY, dt);
+            if (ex != 0 || ey != 0) _statEmits++;
             wheelV = DrainWheel(ref _wheelV);
             wheelH = DrainWheel(ref _wheelH);
-            if (ex == 0 && ey == 0 && _posX == _tgtX && _posY == _tgtY && _wheelV == 0 && _wheelH == 0)
+            if (Ms(now - _statWindowStart) >= 5000)
             {
-                _moveTimer?.Dispose();
-                _moveTimer = null;
-                _speed = 0;
+                if (_statArrivals > 0)
+                    statLine = $"MOVE stats: arrived={_statArrivals} emitTicks={_statEmits} maxPend={_statMaxPend:F0}px interval={_interval:F0}ms";
+                _statArrivals = 0;
+                _statEmits = 0;
+                _statMaxPend = 0;
+                _statWindowStart = now;
             }
         }
+        if (statLine != null) Log(statLine);
         if (ex != 0 || ey != 0)
             Send(Mouse(MOUSEEVENTF_MOVE, ex, ey));
         if (wheelV != 0 || wheelH != 0)
@@ -184,6 +188,19 @@ internal static class InputInjector
             if (wheelH != 0) inputs.Add(Mouse(MOUSEEVENTF_HWHEEL, data: unchecked((uint)wheelH)));
             Send(inputs.ToArray());
         }
+    }
+
+    /// <summary>一定速度で1軸分を捌く。整数化は累積残高の丸め差分で行い、端数を捨てない。</summary>
+    private static int DrainAxis(ref double pend, ref double vel, double dt)
+    {
+        if (pend == 0) { vel = 0; return 0; }
+        double step = vel * dt;
+        if (Math.Abs(step) > Math.Abs(pend)) step = pend;
+        double newPend = pend - step;
+        int emit = (int)Math.Round(pend) - (int)Math.Round(newPend);
+        pend = newPend;
+        if (pend == 0) vel = 0;
+        return emit;
     }
 
     // ---- スクロール細分化 ----
@@ -196,7 +213,6 @@ internal static class InputInjector
         {
             _wheelV += vUnits;
             _wheelH += hUnits;
-            EnsureTimerLocked();
         }
     }
 
