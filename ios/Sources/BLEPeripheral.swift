@@ -22,8 +22,13 @@ final class BLEPeripheral: NSObject, ObservableObject {
     private var mouseChar: CBMutableCharacteristic!
     private var textChar: CBMutableCharacteristic!
     private var serviceAdded = false
-    private var subscribedMouse = false
-    private var subscribedText = false
+    // 購読状態は接続（セントラル）ごとに数える。真偽値1個だと、接続が荒れた時に
+    // 「古い接続の購読解除」が「新しい接続の購読開始」より後に届いてフラグが
+    // false に倒れ、実際は購読されているのに送信が止まる事故になる。
+    private var mouseCentrals: Set<ObjectIdentifier> = []
+    private var textCentrals: Set<ObjectIdentifier> = []
+    private var subscribedMouse: Bool { !mouseCentrals.isEmpty }
+    private var subscribedText: Bool { !textCentrals.isEmpty }
 
     // テキストとマウスのボタン/スクロールは送信キューを積んで取りこぼさない。
     // マウス move は合体（coalesce）して間引くが、端数は蓄積して捨てない。
@@ -255,11 +260,11 @@ extension BLEPeripheral: CBPeripheralManagerDelegate {
 
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
         if characteristic.uuid == Self.mouseUUID {
-            subscribedMouse = true
+            mouseCentrals.insert(ObjectIdentifier(central))
             drainMouseQueue()
         }
         if characteristic.uuid == Self.textUUID {
-            subscribedText = true
+            textCentrals.insert(ObjectIdentifier(central))
             // 相手が1回の通知で受け取れる最大長に合わせてチャンク上限を決める
             textPayloadLimit = max(19, central.maximumUpdateValueLength - 1)
             drainTextQueue()
@@ -268,8 +273,12 @@ extension BLEPeripheral: CBPeripheralManagerDelegate {
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom characteristic: CBCharacteristic) {
-        if characteristic.uuid == Self.mouseUUID { subscribedMouse = false }
-        if characteristic.uuid == Self.textUUID { subscribedText = false }
+        if characteristic.uuid == Self.mouseUUID {
+            mouseCentrals.remove(ObjectIdentifier(central))
+        }
+        if characteristic.uuid == Self.textUUID {
+            textCentrals.remove(ObjectIdentifier(central))
+        }
         refreshConnectionState()
     }
 
