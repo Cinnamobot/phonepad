@@ -17,8 +17,11 @@ internal sealed class BleClient : IDisposable
 
     private readonly BluetoothLEAdvertisementWatcher _watcher;
     private BluetoothLEDevice? _device;
+    private GattSession? _session;
     private bool _busy; // 接続処理中 or 接続済み
     private bool _disposed;
+    private int _fastDropStreak;      // 短命な接続が続いた回数（再接続バックオフ用）
+    private DateTime _connectedAtUtc; // 接続が確立した時刻
 
     /// <summary>診断ログの出力先（TrayContext がファイル書き込みを設定する）</summary>
     public static Action<string>? Logger;
@@ -37,6 +40,8 @@ internal sealed class BleClient : IDisposable
         Log("manual reconnect requested");
         CleanupDevice();
         _busy = false;
+        _fastDropStreak = 0;
+        _connectedAtUtc = default;
         try { _watcher.Stop(); } catch { /* ignore */ }
         if (!_disposed) Start();
     }
@@ -68,12 +73,29 @@ internal sealed class BleClient : IDisposable
         {
             await ConnectAsync(args.BluetoothAddress);
         }
-        catch
+        catch (Exception ex)
         {
+            Log($"connect failed: {ex.GetType().Name}: {ex.Message}");
+            _fastDropStreak++;
             CleanupDevice();
             _busy = false;
-            if (!_disposed) Start();
+            ScheduleRestart();
         }
+    }
+
+    /// <summary>
+    /// 探索再開。短命な接続・失敗が続く場合は間隔を空ける（即リトライの連発は
+    /// 相手の状態遷移と衝突して余計に不安定になるため）。
+    /// </summary>
+    private async void ScheduleRestart()
+    {
+        int delay = _fastDropStreak <= 0 ? 0 : Math.Min(1000 * (1 << Math.Min(_fastDropStreak, 4)), 15000);
+        Log($"restart scan in {delay}ms (fastDropStreak={_fastDropStreak})");
+        if (delay > 0)
+        {
+            try { await Task.Delay(delay); } catch { return; }
+        }
+        if (!_disposed) Start();
     }
 
     private async Task ConnectAsync(ulong address)
@@ -88,9 +110,23 @@ internal sealed class BleClient : IDisposable
             throw new InvalidOperationException("service not found");
         var service = services.Services[0];
 
+        // GATT セッションを維持する。これをしないと Windows が「使われていない接続」と
+        // 判断してセッション側から切りに来ることがあり、切断・再接続の連発になる。
+        _session = await GattSession.FromDeviceIdAsync(_device.BluetoothDeviceId);
+        if (_session != null)
+        {
+            _session.MaintainConnection = true;
+            Log("gatt session maintained");
+        }
+        else
+        {
+            Log("gatt session: null (continuing without maintain)");
+        }
+
         await SubscribeAsync(service, MouseUuid, InputInjector.HandleMousePacket);
         await SubscribeAsync(service, TextUuid, InputInjector.HandleTextPacket);
 
+        _connectedAtUtc = DateTime.UtcNow;
         StatusChanged?.Invoke("接続中（PhonePad）");
     }
 
@@ -125,15 +161,26 @@ internal sealed class BleClient : IDisposable
         Log($"connection status: {sender.ConnectionStatus}");
         if (sender.ConnectionStatus == BluetoothConnectionStatus.Disconnected)
         {
+            // 5秒未満で落ちたら「短命」と数えてバックオフを伸ばす
+            if (_connectedAtUtc != default && DateTime.UtcNow - _connectedAtUtc < TimeSpan.FromSeconds(5))
+                _fastDropStreak++;
+            else
+                _fastDropStreak = 0;
+            _connectedAtUtc = default;
             CleanupDevice();
             _busy = false;
             StatusChanged?.Invoke("切断されました。再探索中…");
-            if (!_disposed) Start();
+            ScheduleRestart();
         }
     }
 
     private void CleanupDevice()
     {
+        if (_session != null)
+        {
+            try { _session.Dispose(); } catch { /* ignore */ }
+            _session = null;
+        }
         if (_device != null)
         {
             _device.ConnectionStatusChanged -= OnConnectionStatusChanged;
