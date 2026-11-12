@@ -105,10 +105,7 @@ internal sealed class BleClient : IDisposable
                   ?? throw new InvalidOperationException("device not found");
         _device.ConnectionStatusChanged += OnConnectionStatusChanged;
 
-        var services = await _device.GetGattServicesForUuidAsync(ServiceUuid, BluetoothCacheMode.Uncached);
-        if (services.Status != GattCommunicationStatus.Success || services.Services.Count == 0)
-            throw new InvalidOperationException("service not found");
-        var service = services.Services[0];
+        var service = await GetServiceAsync(_device);
 
         // GATT セッションを維持する。これをしないと Windows が「使われていない接続」と
         // 判断してセッション側から切りに来ることがあり、切断・再接続の連発になる。
@@ -130,13 +127,39 @@ internal sealed class BleClient : IDisposable
         StatusChanged?.Invoke("接続中（PhonePad）");
     }
 
+    /// <summary>
+    /// サービス参照。まず OS キャッシュを使い（列挙の往復が少なく速い）、
+    /// 駄目なら実問い合わせにフォールバックする。
+    /// </summary>
+    private static async Task<GattDeviceService> GetServiceAsync(BluetoothLEDevice device)
+    {
+        var cached = await device.GetGattServicesForUuidAsync(ServiceUuid, BluetoothCacheMode.Cached);
+        if (cached.Status == GattCommunicationStatus.Success && cached.Services.Count > 0)
+            return cached.Services[0];
+        var fresh = await device.GetGattServicesForUuidAsync(ServiceUuid, BluetoothCacheMode.Uncached);
+        if (fresh.Status != GattCommunicationStatus.Success || fresh.Services.Count == 0)
+        {
+            Log($"service lookup FAILED: cached={cached.Status} uncached={fresh.Status}");
+            throw new InvalidOperationException("service not found");
+        }
+        return fresh.Services[0];
+    }
+
     private static async Task SubscribeAsync(GattDeviceService service, Guid uuid, Action<byte[]> handler)
     {
-        var result = await service.GetCharacteristicsForUuidAsync(uuid, BluetoothCacheMode.Uncached);
+        var result = await service.GetCharacteristicsForUuidAsync(uuid, BluetoothCacheMode.Cached);
         if (result.Status != GattCommunicationStatus.Success || result.Characteristics.Count == 0)
         {
-            Log($"subscribe FAILED (characteristic lookup): {uuid} status={result.Status}");
-            throw new InvalidOperationException($"characteristic not found: {uuid}");
+            var fresh = await service.GetCharacteristicsForUuidAsync(uuid, BluetoothCacheMode.Uncached);
+            if (fresh.Status == GattCommunicationStatus.Success && fresh.Characteristics.Count > 0)
+            {
+                result = fresh;
+            }
+            else
+            {
+                Log($"subscribe FAILED (characteristic lookup): {uuid} cached={result.Status} uncached={fresh.Status}");
+                throw new InvalidOperationException($"characteristic not found: {uuid}");
+            }
         }
         var ch = result.Characteristics[0];
         ch.ValueChanged += (_, args) =>

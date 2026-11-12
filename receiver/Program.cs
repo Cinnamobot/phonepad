@@ -12,9 +12,21 @@ internal static class Program
     [DllImport("winmm.dll")]
     private static extern uint timeEndPeriod(uint uPeriod);
 
+    private static Mutex? _singleInstance;
+
     [STAThread]
     private static void Main()
     {
+        // 多重起動ガード: 旧 exe がトレイに残ったまま新 exe を起動すると、
+        // 2つのレシーバが1台の iPhone を取り合って接続・切断の嵐になる
+        _singleInstance = new Mutex(true, "PhonePadReceiver.SingleInstance", out bool createdNew);
+        if (!createdNew)
+        {
+            MessageBox.Show(
+                "PhonePad Receiver は既に起動しています。\n差し替えるときは先にトレイから旧版を終了してください。",
+                "PhonePad Receiver", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
         timeBeginPeriod(1);
         ApplicationConfiguration.Initialize();
         Application.Run(new TrayContext());
